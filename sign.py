@@ -301,7 +301,7 @@ def fastlane_auth(account_name: str, account_pass: str, team_id: str):
 
     auth_pipe = subprocess.Popen(
         # enable copy to clipboard so we're not interactively prompted
-        ["fastlane", "spaceauth", account_name],
+        ["fastlane", "spaceauth", "-u", account_name],
         stdin=PIPE,
         stdout=PIPE,
         stderr=PIPE,
@@ -507,55 +507,29 @@ def fastlane_get_prov_profile(
     my_env["FASTLANE_PASSWORD"] = account_pass
     my_env["FASTLANE_TEAM_ID"] = team_id
 
-    def create_profile():
-        with tempfile.TemporaryDirectory() as tmpdir_str:
-            run_process(
-                "fastlane",
-                "sigh",
-                "renew",
-                "--app_identifier",
-                bundle_id,
-                "--provisioning_name",
-                clean_dev_portal_name(f"ST {bundle_id} {prov_type}"),
-                "--force",
-                "--skip_install",
-                "--include_mac_in_profiles",
-                "--platform",
-                platform,
-                "--" + prov_type,
-                "--output_path",
-                tmpdir_str,
-                "--filename",
-                "prov.mobileprovision",
-                env=my_env,
-            )
-            shutil.copy2(Path(tmpdir_str).joinpath("prov.mobileprovision"), out_file)
-
-    try:
-        create_profile()
-    except Exception as e:
-        msg = str(e)
-        if "Could not find App ID" not in msg and "Could not find App with App Identifier" not in msg:
-            raise
-
-        print(f"App ID missing or not propagated, creating again: {bundle_id}")
-
+    with tempfile.TemporaryDirectory() as tmpdir_str:
         run_process(
             "fastlane",
-            "produce",
-            "create",
-            "--skip_itc",
+            "sigh",
+            "renew",
             "--app_identifier",
             bundle_id,
-            "--app-name",
-            clean_dev_portal_name(f"ST {bundle_id}"),
+            "--provisioning_name",
+            clean_dev_portal_name(f"ST {bundle_id} {prov_type}"),
+            "--force",
+            "--skip_install",
+            "--include_mac_in_profiles",
+            "--platform",
+            platform,
+            "--" + prov_type,
+            "--output_path",
+            tmpdir_str,
+            "--filename",
+            "prov.mobileprovision",
             env=my_env,
         )
+        shutil.copy2(Path(tmpdir_str).joinpath("prov.mobileprovision"), out_file)
 
-        print("Waiting for Apple Developer Portal propagation...")
-        time.sleep(20)
-
-        create_profile()
 
 def codesign_dump_entitlements(component: Path) -> Dict[Any, Any]:
     entitlements_str = decode_clean(
@@ -1113,6 +1087,20 @@ class Signer:
         return ComponentData(old_bundle_id, bundle_id, entitlements, info_plist)
 
     def sign(self):
+        # Remove all app extensions before signing.
+        # Each .appex needs its own explicit App ID and provisioning profile;
+        # removing them avoids SignTools failures on IPAs with Safari/share/etc. extensions.
+        for appex in safe_glob(self.opts.app_dir, "**/*.appex"):
+            print(f"Removing app extension: {appex}")
+            shutil.rmtree(appex)
+
+        # Rebuild component list after removing extensions so deleted .appex paths
+        # are not processed later.
+        main_app = get_main_app_path(self.opts.app_dir)
+        component_exts = ["*.app", "*.framework", "*.dylib", "PlugIns/*.bundle"]
+        self.components = [item for e in component_exts for item in safe_glob(main_app, "**/" + e)][::-1]
+        self.components.append(main_app)
+
         with tempfile.TemporaryDirectory() as tmpdir_str:
             tmpdir = Path(tmpdir_str)
 
